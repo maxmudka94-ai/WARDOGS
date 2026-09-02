@@ -1,10 +1,18 @@
+import os
 import asyncio
 import discord
 from discord import app_commands
 from deep_translator import GoogleTranslator
+from dotenv import load_dotenv
 
-TOKEN = "MTU0Mjk0MDM3OTUyNjA3NDM5OA.GI81xd.dM9ns01bz9o0jp1vX8MesQGy1xm3JyrH9Tw_rY"
+# Загружаем переменные из файла .env (для локального запуска)
+load_dotenv()
 
+# Получаем токен из переменной окружения
+TOKEN = os.getenv("BOT_TOKEN")
+
+if not TOKEN:
+    raise ValueError("❌ Токен бота не найден! Проверьте переменную BOT_TOKEN в .env или на хостинге.")
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
