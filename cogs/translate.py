@@ -38,7 +38,7 @@ async def translate_context(interaction: discord.Interaction, message: discord.M
         description=translated,
         color=discord.Color(0x5865F2),
     )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=embed)
 
 
 class TranslateCog(commands.Cog):
