@@ -26,6 +26,7 @@ class TwitchCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._states: dict[str, bool] = {}
+        self._live_messages: dict[str, discord.Message] = {}
         self.twitch_loop.start()
 
     def cog_unload(self):
@@ -48,10 +49,16 @@ class TwitchCog(commands.Cog):
         log.info("Инициализация статусов Twitch-каналов...")
         for login in config.TWITCH_CHANNELS:
             add_twitch_channel(login, 0)
+        channel = self.bot.get_channel(config.TWITCH_ANNOUNCE_CHANNEL)
         for login in get_twitch_channels():
             try:
                 stream = await fetch_stream(login)
                 self._states[login] = stream.is_live
+                if stream.is_live and channel is not None:
+                    # Стрим уже шёл до запуска бота — создаём сообщение,
+                    # чтобы дальше обновлять в нём количество зрителей.
+                    msg = await channel.send(embed=self._live_embed(stream))
+                    self._live_messages[login] = msg
             except TwitchError:
                 pass
         log.info("Статусы инициализированы: %s", self._states)
@@ -65,11 +72,21 @@ class TwitchCog(commands.Cog):
         for login in get_twitch_channels():
             stream = await fetch_stream(login)
             was_live = self._states.get(login, False)
+            live_msg = self._live_messages.get(login)
 
             if stream.is_live and not was_live:
-                await channel.send(embed=self._live_embed(stream))
+                # Стрим только начался — постим новое сообщение.
+                msg = await channel.send(embed=self._live_embed(stream))
+                self._live_messages[login] = msg
+            elif stream.is_live and was_live and live_msg is not None:
+                # Стрим продолжается — обновляем количество зрителей.
+                try:
+                    await live_msg.edit(embed=self._live_embed(stream))
+                except discord.NotFound:
+                    self._live_messages.pop(login, None)
             elif not stream.is_live and was_live:
                 await channel.send(embed=self._offline_embed(stream))
+                self._live_messages.pop(login, None)
 
             self._states[login] = stream.is_live
 
