@@ -110,6 +110,12 @@ def init_db():
             sent_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS bot_lease (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            run_id TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS warnings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -427,6 +433,13 @@ def remove_log_channel(log_type: str) -> bool:
 
 # --- Anti-duplicate for log embeds ---
 
+# In-memory кеш заявок (первый барьер). Даже при одном процессе защищает от
+# сдвоенных слушателей/когов; при нескольких процессах дубли отсекает БД.
+_claim_memory: dict[str, float] = {}
+
+import time as _time
+
+
 def make_log_fingerprint(log_type: str, embed) -> str:
     """Стабильный отпечаток эмбеда лога без учёта времени/цвета.
     Используется, чтобы один и тот же лог не уходил дважды (два инстанса
@@ -444,6 +457,16 @@ def try_claim_log(fingerprint: str, ttl_seconds: int = 6) -> bool:
     """Пытается зарегистрировать лог как отправленный.
     Возвращает True, если это первая отправка за окно ttl_seconds,
     иначе False (дубль — отправлять не нужно)."""
+    now = _time.monotonic()
+    prev = _claim_memory.get(fingerprint)
+    if prev is not None and now - prev < ttl_seconds:
+        return False
+    # Умеряем рост кеша — чистим записи старше TTL*10.
+    if len(_claim_memory) > 2048:
+        for k in [k for k, v in _claim_memory.items() if now - v > ttl_seconds * 10]:
+            _claim_memory.pop(k, None)
+    _claim_memory[fingerprint] = now
+
     conn = get_conn()
     cutoff = _time_ago(ttl_seconds)
     conn.execute("DELETE FROM log_sent WHERE sent_at < ?", (cutoff,))
@@ -592,3 +615,59 @@ def is_whitelisted(user_id: int, role_ids: list[int]) -> bool:
         if r["target_type"] == "role" and r["target_id"] in role_ids:
             return True
     return False
+
+
+# --- Single-instance lease ---
+
+LEASE_TTL_SECONDS = 30
+
+
+def _lease_expired() -> str:
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(seconds=LEASE_TTL_SECONDS)).isoformat()
+
+
+def acquire_lease(run_id: str) -> bool:
+    """Пытается занять единственную лицензию на бота.
+    Возвращает True, если лицензия получена (либо удержана прежним живым
+    инстансом, который сам решает, выйти ли). False — если лицензию держит
+    другой процесс с иным run_id."""
+    conn = get_conn()
+    cutoff = _lease_expired()
+    row = conn.execute(
+        "SELECT run_id, expires_at FROM bot_lease WHERE id = 1"
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT OR IGNORE INTO bot_lease (id, run_id, expires_at) VALUES (1, ?, ?)",
+            (run_id, _utcnow()),
+        )
+        conn.commit()
+        check = conn.execute("SELECT run_id FROM bot_lease WHERE id = 1").fetchone()
+        return check and check["run_id"] == run_id
+    if row["run_id"] == run_id:
+        return True
+    if row["expires_at"] < cutoff:
+        conn.execute(
+            "UPDATE bot_lease SET run_id = ?, expires_at = ? WHERE id = 1",
+            (run_id, _utcnow()),
+        )
+        conn.commit()
+        check = conn.execute("SELECT run_id FROM bot_lease WHERE id = 1").fetchone()
+        return check and check["run_id"] == run_id
+    return False
+
+
+def renew_lease(run_id: str) -> None:
+    conn = get_conn()
+    conn.execute(
+        "UPDATE bot_lease SET expires_at = ? WHERE id = 1 AND run_id = ?",
+        (_utcnow(), run_id),
+    )
+    conn.commit()
+
+
+def release_lease(run_id: str) -> None:
+    conn = get_conn()
+    conn.execute("DELETE FROM bot_lease WHERE id = 1 AND run_id = ?", (run_id,))
+    conn.commit()
