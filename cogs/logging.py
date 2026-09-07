@@ -1,4 +1,5 @@
 import logging
+import traceback
 from datetime import timedelta
 
 import discord
@@ -21,6 +22,8 @@ LOG_TYPES = {
     "channels": "Изменение каналов",
     "voice": "Голосовые каналы",
     "joins": "Вход/выход участников",
+    "tickets": "Логи тикетов",
+    "errors": "Логи любых ошибок",
 }
 
 COLORS = {
@@ -30,6 +33,19 @@ COLORS = {
     "channels": discord.Color.teal(),
     "voice": discord.Color.dark_teal(),
     "joins": discord.Color.green(),
+    "tickets": discord.Color.gold(),
+    "errors": discord.Color.dark_red(),
+}
+
+# Каналы логов по умолчанию (хардкод). Если канал для типа не задан через
+# /logs set — лог уходит сюда. Приоритет: /logs set > БД > этот словарь.
+DEFAULT_LOG_CHANNELS = {
+    "tickets": 1545113128625246310,
+    "errors": 1546556382566678528,
+    "voice": 1546556434421129327,
+    "joins": 1546556497398468618,
+    "moderation": 1546556555036721252,
+    "messages": 1546556589157388359,
 }
 
 
@@ -44,7 +60,7 @@ class LoggingCog(commands.Cog):
     def _channel_for(self, guild: discord.Guild, log_type: str) -> discord.TextChannel | None:
         if guild is None:
             return None
-        cid = get_log_channel(log_type)
+        cid = get_log_channel(log_type) or DEFAULT_LOG_CHANNELS.get(log_type)
         if not cid:
             return None
         ch = guild.get_channel(cid)
@@ -466,6 +482,43 @@ class LoggingCog(commands.Cog):
                 timestamp=now,
             )
             await self._send(guild, "voice", embed)
+
+    # ---------- Логи ошибок ----------
+
+    @commands.Cog.listener()
+    async def on_app_command_error(self, interaction: discord.Interaction, error: Exception):
+        if interaction.guild is None:
+            return
+        from discord.app_commands.errors import CommandInvokeError, CommandNotFound
+        # CommandNotFound — нормальная ситуация (команда ещё не синхронизирована
+        # в кэше Discord). Такое не считаем ошибкой и не логируем.
+        if isinstance(error, CommandNotFound):
+            return
+        # Логируем только реальные сбои выполнения, остальное (нет прав,
+        # не найдено, ошибки проверки) — это ожидаемое поведение.
+        if not isinstance(error, CommandInvokeError):
+            return
+
+        real = error.original if isinstance(error, CommandInvokeError) else error
+
+        tb = "".join(
+            traceback.format_exception(type(real), real, real.__traceback__)
+        )
+        name = (interaction.command.qualified_name if interaction.command else "?")
+        line_no = real.__traceback__.tb_lineno if real.__traceback__ else "?"
+        embed = discord.Embed(
+            title=f"Ошибка команды {name}",
+            description=f"```py\n{tb[-1500:]}\n```",
+            color=discord.Color.dark_red(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="Пользователь", value=f"{interaction.user.mention} ({interaction.user})", inline=False)
+        embed.add_field(
+            name="Тип",
+            value=f"`{type(real).__name__}` (строка {line_no})",
+            inline=False,
+        )
+        await self._send(interaction.guild, "errors", embed)
 
 
 async def setup(bot: commands.Bot):
