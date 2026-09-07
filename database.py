@@ -1,3 +1,4 @@
+import hashlib
 import sqlite3
 import threading
 
@@ -8,6 +9,11 @@ _local = threading.local()
 def _utcnow() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
+
+
+def _time_ago(seconds: int) -> str:
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
 
 
 def get_conn() -> sqlite3.Connection:
@@ -97,6 +103,11 @@ def init_db():
         CREATE TABLE IF NOT EXISTS log_channels (
             log_type TEXT PRIMARY KEY,
             channel_id INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS log_sent (
+            fingerprint TEXT PRIMARY KEY,
+            sent_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS warnings (
@@ -412,6 +423,39 @@ def remove_log_channel(log_type: str) -> bool:
     cur = conn.execute("DELETE FROM log_channels WHERE log_type = ?", (log_type,))
     conn.commit()
     return cur.rowcount > 0
+
+
+# --- Anti-duplicate for log embeds ---
+
+def make_log_fingerprint(log_type: str, embed) -> str:
+    """Стабильный отпечаток эмбеда лога без учёта времени/цвета.
+    Используется, чтобы один и тот же лог не уходил дважды (два инстанса
+    бота, двойная обработка события и т.п.)."""
+    parts = [log_type, embed.title or ""]
+    if embed.description:
+        parts.append(embed.description)
+    for f in embed.fields:
+        parts.append(f"{f.name}\x00{f.value}")
+    raw = "\x01".join(parts)
+    return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()
+
+
+def try_claim_log(fingerprint: str, ttl_seconds: int = 6) -> bool:
+    """Пытается зарегистрировать лог как отправленный.
+    Возвращает True, если это первая отправка за окно ttl_seconds,
+    иначе False (дубль — отправлять не нужно)."""
+    conn = get_conn()
+    cutoff = _time_ago(ttl_seconds)
+    conn.execute("DELETE FROM log_sent WHERE sent_at < ?", (cutoff,))
+    try:
+        conn.execute(
+            "INSERT INTO log_sent (fingerprint, sent_at) VALUES (?, ?)",
+            (fingerprint, _utcnow()),
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
 
 
 # --- Warnings ---

@@ -11,6 +11,8 @@ from database import (
     set_log_channel,
     get_all_log_channels,
     remove_log_channel,
+    make_log_fingerprint,
+    try_claim_log,
 )
 
 log = logging.getLogger("logging")
@@ -89,6 +91,12 @@ class LoggingCog(commands.Cog):
     async def _send(self, guild, log_type, embed):
         ch = self._channel_for(guild, log_type)
         if not ch:
+            return
+        # Анти-дубль: один и тот же лог (по содержимому) не отправляем дважды
+        # в течение окна. Защита от двух инстансов бота / двойной обработки.
+        fp = make_log_fingerprint(log_type, embed)
+        if not try_claim_log(fp):
+            log.info("Пропущен дубль лога (%s)", log_type)
             return
         try:
             await ch.send(embed=embed)

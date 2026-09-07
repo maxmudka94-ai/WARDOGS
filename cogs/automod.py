@@ -23,6 +23,8 @@ from database import (
     get_whitelist,
     is_whitelisted,
     get_log_channel,
+    make_log_fingerprint,
+    try_claim_log,
 )
 
 log = logging.getLogger("automod")
@@ -67,6 +69,9 @@ class AutomodCog(commands.Cog):
             return
         ch = guild.get_channel(cid)
         if not ch:
+            return
+        if not try_claim_log(make_log_fingerprint("moderation", embed)):
+            log.info("Пропущен дубль лога модерации")
             return
         try:
             await ch.send(embed=embed)
