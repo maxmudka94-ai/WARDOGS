@@ -327,7 +327,8 @@ def get_mirror_dests(source_guild_id: int, source_channel_id: int) -> list[int]:
         for x in (r["dest_channels"] or "").split(","):
             if x.strip().isdigit():
                 out.append(int(x))
-    return out
+    # Дедуп: если два зеркала указывают на один dest — не слать дважды
+    return list(dict.fromkeys(out))
 
 
 # --- Backgrounds (фоны rank-карточки из БД, удобно на хостинге) ---
